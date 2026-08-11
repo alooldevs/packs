@@ -15,8 +15,9 @@ git clone git@github.com:alooldevs/packs.git ~/Documents/tools/packs   # or anyw
 cd ~/Documents/tools/packs && ./install.sh
 ```
 
-Lays every pack into `~/.claude/packs/`. Re-run after edits — the repo is the source of truth,
-the installed copy is disposable.
+Lays every pack into `~/.claude/packs/` (`./install.sh frappe` for just one). Or, with cadre
+installed, just run `cadre install` (interactive choose/skip) and `cadre sync` after edits —
+the repo is the source of truth, the installed copy is disposable.
 
 ## Packs
 
