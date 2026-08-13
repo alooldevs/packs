@@ -27,3 +27,5 @@ echo "Per action: read only the matching trigger section in $here/CONTRACTS.md (
 echo "'I am about to create a file — any file': take the lowest rung that fits, say why)."
 echo "Before deciding what to build: python3 $here/frame.py --new-app <name>  |  frame.py \"<DocType>\" --app <path>"
 echo "Before saying done: python3 $here/probe.py --gate <app path>   # exit 1 on a contract breach"
+echo "Kit defect/improvement? Never edit $here — fix it in the packs repo (packs_repo in"
+echo "~/.claude/cadre.json), run cadre sync; or log it in the project ledger as tooling:frappe."
