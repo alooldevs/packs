@@ -794,9 +794,23 @@ Three idioms, and they do not fail in the same places:
 |---|---|---|
 | *(unset)* | nothing, straight to site default | everywhere, silently |
 | `"currency"` | a `currency` field on this doctype, or **on its parent** for a child row | a child row read detached, with no `parenttype` |
-| `"Company:company:default_currency"` | fetching the linked Company | **any list view** — see F32 |
+| `"Company:company:default_currency"` | fetching the linked Company at paint time | **any list view** (F32), and **any child row** |
 
-Two consequences people get backwards:
+**The three-part form has no parent fallback.** That fallback lives only in the plain branch
+(`meta.py:833-835`). The three-part branch reads `doc.get("company")` off the row being painted, and a
+child row has no `company` field, so it returns `None` and lands on the site default. Verified: the same
+child row resolves `EUR` under `"currency"` and `None` under `"Company:company:default_currency"`.
+
+So the three-part idiom is only available to a doctype **whose money fields have no child table** — and
+choosing it means you cannot add one later without revisiting every Currency field. It also fails
+silently when the link field itself is empty (`meta.py:831` guards on `doc.get(split_opts[1])`).
+
+Where it earns its place: a row the system appends, which cannot use `fetch_from` at all because
+`fetch_from` is applied inside `_validate_links` and the writer sets `ignore_links` (F22). A ledger row
+is exactly that shape, which is why it is the one place the three-part form is the right answer rather
+than the tidy-looking one.
+
+Two more consequences people get backwards:
 
 **A child table needs no `currency` field of its own.** With `options: "currency"` and no such field,
 `get_field_currency` looks for a field of that name on the *parent* doctype and reads it there. That is
