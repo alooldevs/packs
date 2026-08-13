@@ -193,13 +193,19 @@ locate: grep -n 'is_tree' apps/frappe/frappe/core/doctype/doctype/doctype.py
         grep -n 'nsm_parent_field' apps/frappe/frappe/utils/nestedset.py
 ```
 
-### F4 — `amended_from` is required for amendment and the framework will not add it. [F]
+### F4 — `amended_from` is added for you, at the end. Declare it anyway, where it belongs. [F]
 
 **Trigger:** you set `is_submittable: 1` on anything.
 
-Setting `is_submittable` does not create the field. What the framework does is *act on it when
-present*: validate that the source is cancelled (`docstatus == 2`), and copy its attachments.
-`delete_doc` additionally exempts this link from the cancel-time link check.
+The framework adds it. `DocType.make_amendable` appends the docfield whenever `is_submittable` is
+set, and it runs inside `DocType.validate`, so it fires on every save and on every import. Omitting
+it from your JSON does not leave it out, it leaves it **appended after every other field**, at the
+bottom of the last section, in a position nobody chose.
+
+It is hidden, so nothing looks wrong on the form. It shows up when someone reorders fields, or reads
+the JSON and finds a field the file never declared.
+
+So declare it, in the position you want it, exactly as the framework would build it:
 
 ```json
 {"fieldname": "amended_from", "fieldtype": "Link", "options": "<the doctype itself>",
@@ -207,16 +213,36 @@ present*: validate that the source is cancelled (`docstatus == 2`), and copy its
  "print_hide": 1, "ignore_user_permissions": 1}
 ```
 
-**What breaks without it:** no amendment flow, no attachment carry-over, and no guard that the
-source was cancelled. **[R]** erpnext 76/81 submittables carry it, hrms 53/53. The five without
-it are all ledger rows the system appends — `gl_entry`, `stock_ledger_entry`,
-`payment_ledger_entry`, `advance_payment_ledger_entry`, `account_closing_balance`. That is the
-rule, not five exceptions: **a document a user submits carries it; a row the system appends
-does not.**
+What the framework does with it once present: validate that the source is cancelled
+(`docstatus == 2`), and copy its attachments. `delete_doc` additionally exempts this link from the
+cancel-time link check.
+
+**Which doctypes should carry it.** **[R]** erpnext 76/81 submittables carry it, hrms 53/53. The five
+without are all ledger rows the system appends — `gl_entry`, `stock_ledger_entry`,
+`payment_ledger_entry`, `advance_payment_ledger_entry`, `account_closing_balance`. That is the rule,
+not five exceptions: **a document a user submits carries it; a row the system appends does not.**
+
+**But do not act on that rule without reading the next paragraph.** `probe.py --gate` fires on the
+*rate* across all submittables in the app, threshold 0.94, and it does not exempt ledger rows. In a
+small app one correct exception sinks the rate: an app with 7 submittables that removes the field from
+its one ledger doctype sits at 6/7 = 0.86 and gates red **permanently**. A gate that always fails is
+not a gate; it teaches the next session to skip the output, and a real breach walks through behind the
+one everyone learned to ignore.
+
+In an app with few submittables, keep the field on the ledger row. It costs one hidden column nothing
+ever populates. The rule above tells you what is *correct*; the gate tells you what is *checkable*, and
+in a small app they disagree.
 
 ```sh
-locate: grep -n 'def validate_amended_from' -A 8 apps/frappe/frappe/model/document.py
+locate: grep -n 'def make_amendable' -A 12 apps/frappe/frappe/core/doctype/doctype/doctype.py
+       grep -n 'self.make_amendable()' apps/frappe/frappe/core/doctype/doctype/doctype.py
+       grep -n 'def validate_amended_from' -A 8 apps/frappe/frappe/model/document.py
 ```
+
+> Corrected 2026-08-13. This contract previously read "the framework will not add it" and stated that
+> setting `is_submittable` does not create the field. Both were wrong in frappe 16.0.0-dev. Surfaced by
+> the `manager` project, where a track removed the field on F4's authority, the gate went red, and the
+> ruling had to be reversed twice before anyone read `make_amendable`.
 
 ### F22 — `_validate_links` runs before every hook you could set the value from. [F]
 
@@ -840,6 +866,63 @@ Remove the folders too, under a guard that refuses to run unless it matches what
 
 ```python
 assert sorted(found) == sorted(intended), f"refusing: {set(found) ^ set(intended)}"
+```
+
+### F30 — Importing a Workspace from a script deletes its source folder. Migrate is safe. [F]
+
+**Trigger:** you are about to install, verify, or repair a Workspace outside `bench migrate`.
+
+Two traps, from opposite directions. Both fired on the same project inside one hour, the second one
+twice, the second time on the person who had just written down the warning.
+
+**Trap 1 — the import eats the file.** Not only `import_file_by_path`. `frappe.reload_doc(..., force=True)`
+runs the same path. It calls `frappe.delete_doc(..., for_reload=True)`, and **`for_reload` does not
+suppress `after_delete`** — that call sits outside the guard. `Workspace.after_delete` calls
+`delete_folder`, which is `shutil.rmtree`.
+
+A filesystem delete is not in the transaction, so both outcomes are bad and neither announces itself:
+
+| You did | Database | Disk |
+|---|---|---|
+| rolled back | correct, restored | **folder gone** |
+| committed | correct | **folder gone, app ships no workspace** |
+
+`bench migrate` is safe, and only by accident of a guard: `after_delete` returns early when
+`disable_saving_as_public()` is true, which covers `in_migrate`, `in_install`, `in_patch`, `in_test`,
+`in_fixtures`, `in_uninstall`. A bare script sets none of them.
+
+> **Never import a Workspace from a script, including to verify one.** Verify by reading the database.
+> To install one, run `bench migrate`.
+
+**Trap 2 — migrate silently skips it.** The `modified` field in the JSON is the sync key, not
+decoration. If it matches the database row, import skips the file and **migrate reports success having
+installed nothing.** It is indistinguishable from a real migrate unless you read the database after.
+
+**Repair, when the database holds the good copy.** Export, never import:
+
+```python
+export_to_files(record_list=[["Workspace", "<Name>"]], record_module="<Module>")
+```
+
+`export_to_files` only writes. `delete_folder` is reached from `after_delete` and from a module or
+title change, so exporting is safe exactly where importing is not.
+
+**Then bump `modified` in the file**, strictly past the database row. The export writes the row's own
+timestamp back, which re-arms trap 2 immediately.
+
+```sh
+locate: grep -n 'def after_delete' -A 8 apps/frappe/frappe/desk/doctype/workspace/workspace.py
+       grep -n 'def disable_saving_as_public' -A 8 apps/frappe/frappe/desk/doctype/workspace/workspace.py
+       grep -n 'run_method("after_delete")' apps/frappe/frappe/model/delete_doc.py
+```
+
+**Verify a workspace off the database, never off the file**, and check reachability rather than counts:
+
+```python
+d = frappe.get_doc("Workspace", "<Name>")
+reach = {l.link_to for l in d.links} | {s.link_to for s in d.shortcuts}
+missing = [x for x in frappe.get_all("DocType", filters={"module": "<M>", "istable": 0}, pluck="name")
+           if x not in reach]
 ```
 
 ### F27 — If a script defines the schema, the script is the schema. [A]

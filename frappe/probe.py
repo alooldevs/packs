@@ -62,9 +62,10 @@ CONTRACTS = [
      "python3 -c \"import json,glob;print(sum(1 for p in glob.glob('apps/frappe/frappe/"
      "**/doctype/*/*.json',recursive=True) for f in (json.load(open(p)).get('fields') or []) "
      "if f.get('fieldtype')=='Column Break' and f.get('label'))\""),
-    ("F5", "the framework acts on amended_from but never creates it; amendment requires the "
-           "source to be docstatus 2",
-     "grep -n 'def validate_amended_from' -A6 apps/frappe/frappe/model/document.py"),
+    ("F5", "make_amendable APPENDS amended_from whenever is_submittable is set, from inside "
+           "DocType.validate, so omitting it lands it last rather than leaving it out; amendment "
+           "requires the source to be docstatus 2",
+     "grep -n 'def make_amendable' -A12 apps/frappe/frappe/core/doctype/doctype/doctype.py"),
 ]
 
 # --------------------------------------------------------------------------- [R] reference bands
@@ -548,9 +549,20 @@ def gate(m):
                                 f"rather than a human (0 of 229 in frappe): "
                                 + ", ".join(fc["junk_breaks"][:6])))
     if m["amended_from"]["rate"] < GATE_AMENDED_FROM and m["amended_from"]["submittable"]:
-        breaches.append(("F5", f"{len(m['amended_from']['missing'])} of "
-                               f"{m['amended_from']['submittable']} submittable doctypes have no "
-                               f"amended_from: {', '.join(m['amended_from']['missing'][:6])}"))
+        miss, subs = m["amended_from"]["missing"], m["amended_from"]["submittable"]
+        msg = (f"{len(miss)} of {subs} submittable doctypes have no amended_from: "
+               f"{', '.join(miss[:6])}")
+        # A correct exception still sinks the rate, and in a small app it sinks it for good.
+        # Say so here rather than leave someone to rediscover it: a gate that always fails
+        # teaches the next session to skip the output, and a real breach walks through behind it.
+        if any("ledger row?" in n for n in miss):
+            msg += (f"\n        Some of those look like ledger rows the system appends, which F4 says "
+                    f"correctly do NOT carry\n        the field. This gate measures a RATE "
+                    f"({GATE_AMENDED_FROM:.0%}) and does not exempt them, so with only {subs} "
+                    f"submittable(s)\n        one correct exception holds it red permanently. In a "
+                    f"small app, keep the field: one hidden column\n        nothing populates costs "
+                    f"less than a gate nobody reads. See CONTRACTS.md F4.")
+        breaches.append(("F5", msg))
     return breaches
 
 
