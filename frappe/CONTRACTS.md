@@ -779,6 +779,112 @@ except frappe.ValidationError as e:
 
 Pair it with F18: tag the assertion. A negative test you designed yourself is still `(a)`.
 
+### F31 — Every money figure resolves through a chain that ends at the site default. [F]
+
+**Trigger:** you added a `Currency` field. Any `Currency` field, anywhere.
+
+A `Currency` field does not carry a currency. It resolves one, at paint time, through
+`get_field_currency`, and **every link in that chain fails soft to the site default.** Nothing throws.
+Nothing logs. The number is right and the symbol is wrong, which is the one kind of wrong an accountant
+notices and a test never does.
+
+Three idioms, and they do not fail in the same places:
+
+| `options` | Resolves by | Dies where |
+|---|---|---|
+| *(unset)* | nothing, straight to site default | everywhere, silently |
+| `"currency"` | a `currency` field on this doctype, or **on its parent** for a child row | a child row read detached, with no `parenttype` |
+| `"Company:company:default_currency"` | fetching the linked Company | **any list view** — see F32 |
+
+Two consequences people get backwards:
+
+**A child table needs no `currency` field of its own.** With `options: "currency"` and no such field,
+`get_field_currency` looks for a field of that name on the *parent* doctype and reads it there. That is
+the design. Adding currency columns to five child tables is five columns nothing ever reads.
+
+**A field you set that has no column still works, right up until it does not.** A controller can set
+`self.currency` on a doctype with no such column; `get_valid_dict` drops it on the way to the table and
+the attribute survives on the Python object. So the document in hand is right, the database is empty,
+and a test asserting on the document passes. Read through `frappe.db.get_value` to tell them apart.
+
+> **Build the test bed so the fallback is visible.** Set the site's default currency to something no
+> company uses. Then a figure painted from the fallback is wrong *on every screen*, instead of being
+> invisible because the site default happened to match.
+
+This generalises past money. Anything with a silent fallback — language, timezone, precision, naming
+series, letterhead — is untestable while the fallback value equals the correct value. Make them differ
+first, or the test cannot fail.
+
+```sh
+locate: grep -n 'def get_field_currency' -A 25 apps/frappe/frappe/model/meta.py
+       grep -n 'get_field_currency\|df.options' apps/frappe/frappe/public/js/frappe/model/meta.js
+```
+
+### F32 — `locals` holds what the view loaded. A form idiom is not a list idiom. [F]
+
+**Trigger:** anything client-side that resolves through a **linked** document — a three-part
+`options`, a title from another doctype, a computed label, a formatter reaching for `locals`.
+
+A form loads its linked documents into client-side `locals`. **A list view loads nothing but the
+fields you named in `add_fields`.** So `frappe.get_value("Company", ...)` in a list returns `null`,
+every time, and whatever depends on it quietly shows a default.
+
+Measured inside a live list view, on a doctype whose `options` was `Company:company:default_currency`:
+
+```
+row company              Northwind (USD)
+locals has Company       FALSE
+get_value("Company",…)   null
+get_field_currency       ETB      <- the site default, on a USD company, on all 88 rows
+```
+
+The data was present — `company` was in `add_fields`. **The lookup was what failed.** On the same page
+load, a sibling doctype using the plain `"currency"` idiom painted correctly, because that one reads a
+field on the row rather than a document through a link.
+
+Fix it in the list, not in the schema: read what you need once in `onload`, keep a map, and paint from
+a `formatters` block. No doctype change, so no migrate.
+
+> The general rule: **before using a client-side idiom in a new view, ask what that view loaded.**
+> Form, list, report, kanban, calendar and dashboard populate `locals` differently. An idiom proven on
+> a form is unproven everywhere else.
+
+### F33 — The grid already painted, and dashboard alerts append. [F]
+
+**Trigger:** you set a value in a form script and expect the screen to follow.
+
+Two separate ways the screen disagrees with the document, both invisible to every test.
+
+**The grid painted before your value landed.** Set a parent field that child cells resolve through, and
+the rows are already drawn with the old answer. Seen on an untouched new document: the parent total
+read `$ 0.00` while the grid cells directly beneath it read `ETB 0.00`, in one screenshot. The lookup
+was correct; the paint was stale. Refreshing the table field fixed it.
+
+```js
+frm.set_value("currency", …);
+frm.refresh_field("lines");     // the grid does not repaint itself for this
+```
+
+**Dashboard alerts append, they do not replace.** `set_headline_alert` ends in
+`.appendTo(this.message)`. Call it on every recompute and the headlines *stack*, oldest at the top. One
+balanced entry left four: two stale orange "credit short by $250.00" sitting **above** two green
+"balanced". The document was correct. The first thing the person read was a warning that was false, and
+they will believe it over the numbers.
+
+Clear before every paint, not only in the branch that happens to clear today.
+
+> The class: on a form, *"I set the value"* and *"the person sees the value"* are different events, and
+> nothing tells you when the second one did not happen. Anything you paint from a handler that can fire
+> twice must be idempotent on the screen, not just in the data.
+
+(`add_custom_button` is already idempotent — it refuses a duplicate label — so buttons are safe to
+re-add on every keystroke. Headlines and indicators are not.)
+
+```sh
+locate: grep -n 'appendTo(this.message)' apps/frappe/frappe/public/js/frappe/form/layout.js
+       grep -n 'set_headline_alert\|clear_headline' -r apps/frappe/frappe/public/js/frappe/form/
+```
+
 ---
 
 ## 5 · I am about to run a script, a batch, or a migration
@@ -867,6 +973,29 @@ Remove the folders too, under a guard that refuses to run unless it matches what
 ```python
 assert sorted(found) == sorted(intended), f"refusing: {set(found) ^ set(intended)}"
 ```
+
+### F36 — On a shared bench, one thing runs `migrate`. Your missing one breaks someone else's tests. [F]
+
+**Trigger:** more than one session, agent or person is working in the same bench.
+
+Two facts that look alike and are not:
+
+- **Creating a DocType through the framework installs it and builds its table.** No migrate owed.
+- **Adding a field to an existing doctype does not.** A migrate is owed, and until it runs the column
+  does not exist.
+
+The symptom of the second is `MySQLdb.OperationalError: Unknown column 'x' in 'SELECT'` — raised inside
+a **test**, which reads as a code bug, in whatever module happens to touch it. It surfaced here in
+another track's suite, hours after the field was added, and cost a session's worth of wrong diagnosis
+before anyone connected the two.
+
+Concurrent migrates on one site collide, so name a single owner. Everyone else writes files and asks.
+Put that warning **next to the command** in the app's entry file, not only in a contract document — the
+entry file is what a fresh session reads first, and it is where the collision gets started.
+
+> A gate for shared benches: after a schema change, either you ran the migrate or you told the owner.
+> There is no third state, and "it worked in my module" is not one, because your module may not touch
+> the new column.
 
 ### F30 — Importing a Workspace from a script deletes its source folder. Migrate is safe. [F]
 
@@ -1025,6 +1154,76 @@ the actual decision leaves the suite green, the suite is not testing the decisio
 > Run `git checkout` from inside the repository. Run it from a parent directory that is not a git
 > repo and it fails, prints to stderr, and leaves the mutant in your working tree — which is B5 and
 > F14 again: read the durable side by name.
+
+**Before mutating anything, confirm the test can run at all.** A mutation check on a skipped test
+proves nothing and looks exactly like a pass. Three shapes of test that cannot fail, all found in one
+app in one day, all green:
+
+| Shape | Why it cannot fail |
+|---|---|
+| asserts on the object it just wrote to | the value never reached the table; the attribute survives in memory (F31) |
+| asserts a stored field **did not** move | nothing happened, and it cannot tell that from the mechanism working |
+| `self.skipTest(...)` behind a precondition | a skip reads as green and exits 0 |
+
+The third is the worst, because the other two at least execute. And its damage depends on
+**granularity**, which is the part that hides it:
+
+```
+run-tests --app <app>       discovery dies, 0 tests run, exit 1     loud
+run-tests --module <one>    OK (skipped=25),            exit 0     silent, and this is what CI reads
+```
+
+If a precondition is real enough to guard, declare the dependency at module level and let it fail
+loudly, then add **one** named test that says what broke. Do not let dozens of tests excuse themselves
+one at a time.
+
+### F34 — Frappe rolls back once per test **class**, not per test. [F]
+
+**Trigger:** two tests in one class both write, and the second one reads a total.
+
+`IntegrationTestCase` registers `addClassCleanup(_rollback_db)`. One rollback, at the end of the class.
+Every test in that class runs inside the same open transaction and **sees everything the earlier ones
+wrote**, in alphabetical order.
+
+The tell is arithmetic. Five failures in one class read `450.0 != 90`, `360.0 != 90`, `630.0 != 90`,
+`720.0 != 90` — every actual an exact multiple of the fixture amount. That is accumulation, not a
+calculation bug, and the production code was correct the whole time.
+
+Give each test its own fixtures, or assert on a delta rather than an absolute. Building fresh scope per
+test is usually better than differencing, because it also proves the isolation the app claims.
+
+```sh
+locate: grep -n 'addClassCleanup\|_rollback_db' apps/frappe/frappe/tests/classes/integration_test_case.py
+```
+
+### F35 — A negative result is only as good as the check that produced it. [A]
+
+**Trigger:** you are about to report that something is absent, missing, unused, or not there.
+
+"I looked and found nothing" and "nothing is there" are different claims, and the first is worthless
+unless the check could have found a present case. Three real examples from one day, each reported as
+fact and each wrong:
+
+```python
+frappe.db.count(dt, {"currency": ["in", [None, ""]]})   # 0
+# SQL NULL is never equal to anything, so IN (NULL, '') cannot match a NULL.
+# Actual NULLs: 23. Use ["is", "not set"], or IS NULL in raw SQL.
+```
+
+```sh
+grep 'def test_.*move'      # "missing"; the test was named ..._moving_..., which `move` cannot match
+```
+
+```
+"113 of 177 tests are guarded"   # counted tests IN those files, not tests CARRYING the guard. It was 67.
+```
+
+> Before reporting an absence, **prove the check finds a known present case.** Grep for something you
+> know is there. Run the NULL filter against a row you just nulled. If the check cannot produce a
+> positive, it cannot produce a credible negative.
+
+This is F28 pointed at your own tooling: a check that cannot fail is worth nothing, and that applies to
+the greps and queries you verify with, not only the tests you ship.
 
 ### F29 — Nothing in this kit has looked at the form. Open it. [A]
 
