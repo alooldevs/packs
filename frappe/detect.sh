@@ -29,3 +29,6 @@ echo "Before deciding what to build: python3 $here/frame.py --new-app <name>  | 
 echo "Before saying done: python3 $here/probe.py --gate <app path>   # exit 1 on a contract breach"
 echo "Kit defect/improvement? Never edit $here — fix it in the packs repo (packs_repo in"
 echo "~/.claude/cadre.json), run cadre sync; or log it in the project ledger as tooling:frappe."
+if [ -d "$here/skills" ] && ! ls "$PWD"/.claude/skills/frappe-* >/dev/null 2>&1; then
+  echo "Frappe skills are not linked in this folder — run: bash $here/link-skills.sh \"$PWD\"  (then restart the session)"
+fi

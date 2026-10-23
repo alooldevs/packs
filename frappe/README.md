@@ -14,6 +14,10 @@ README.md       this — the index, and what it does not establish
 fires before every other one: take the lowest rung that fits — a framework record, then a
 low-code record, then app code — and write the line that says why the rung below cannot do it.
 
+The `frappe-*` skills live in `skills/` and load **only in Frappe projects**. Link them into a
+project once with `bash link-skills.sh [project dir]`; `detect.sh` reminds you in any Frappe
+folder where they are not linked yet.
+
 ---
 
 ## Start here, every session
